@@ -95,6 +95,12 @@ enum CommandEvent {
     End { id: u64, _exit_code: i32 },
 }
 
+struct QueuedPiece {
+    run_id: u64,
+    cycle: u64,
+    piece: Piece,
+}
+
 struct CommandRun {
     id: u64,
     chunks: Vec<String>,
@@ -112,7 +118,7 @@ impl CommandRun {
         }
     }
 
-    fn next_cycle_pieces(&mut self) -> Vec<Piece> {
+    fn next_cycle_pieces(&mut self) -> (u64, Vec<Piece>) {
         self.cycle = self.cycle.wrapping_add(1);
         let mut pieces = Vec::new();
         for chunk in &self.chunks {
@@ -120,7 +126,7 @@ impl CommandRun {
             let shape = random_shape();
             pieces.push(Piece::with_payload(shape, payload));
         }
-        pieces
+        (self.cycle, pieces)
     }
 }
 
@@ -247,8 +253,9 @@ struct Game {
     clear_flash_frames: u8,
     lock_flash_cells: Vec<(usize, usize)>,
     lock_flash_frames: u8,
-    piece_queue: VecDeque<Piece>,
+    piece_queue: VecDeque<QueuedPiece>,
     active_piece: bool,
+    active_run: Option<u64>,
     active_runs: HashMap<u64, CommandRun>,
 }
 
@@ -267,6 +274,7 @@ impl Game {
             lock_flash_frames: 0,
             piece_queue: VecDeque::new(),
             active_piece: false,
+            active_run: None,
             active_runs: HashMap::new(),
         };
         game
@@ -300,6 +308,7 @@ impl Game {
             }
         }
         self.lock_flash_frames = 1;
+        self.active_run = None;
         self.active_piece = false;
         let full_rows: Vec<usize> = (0..self.board.height)
             .filter(|y| (0..self.board.width).all(|x| matches!(self.board.get(x, *y), Cell::Filled(_, _))))
@@ -375,15 +384,17 @@ impl Game {
 
     fn spawn_next(&mut self) {
         self.ensure_queue();
-        if let Some(piece) = self.piece_queue.pop_front() {
+        if let Some(qp) = self.piece_queue.pop_front() {
             self.active_piece = true;
-            if self.can_place(&piece) {
-                self.current = piece;
+            self.active_run = Some(qp.run_id);
+            if self.can_place(&qp.piece) {
+                self.current = qp.piece;
             } else {
                 self.game_over = true;
             }
         } else {
             self.active_piece = false;
+            self.active_run = None;
         }
     }
 
@@ -413,6 +424,9 @@ impl Game {
                 if let Some(run) = self.active_runs.get_mut(&id) {
                     run.active = false;
                 }
+                // Drop queued pieces from repeat cycles for this run.
+                self.piece_queue
+                    .retain(|qp| qp.run_id != id || qp.cycle <= 1);
             }
         }
     }
@@ -429,9 +443,13 @@ impl Game {
         }
         for run in self.active_runs.values_mut() {
             if run.active {
-                let pieces = run.next_cycle_pieces();
+                let (cycle, pieces) = run.next_cycle_pieces();
                 for p in pieces {
-                    self.piece_queue.push_back(p);
+                    self.piece_queue.push_back(QueuedPiece {
+                        run_id: run.id,
+                        cycle,
+                        piece: p,
+                    });
                 }
             }
         }

@@ -1,0 +1,9 @@
+[package]
+name = "stack-game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.26"
+crossterm = "0.27"
+rand = "0.8"

@@ -100,22 +100,6 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
         }
     }
 
-    // Line clear flash override.
-    if game.clear_flash_frames > 0 && !game.pending_clear.is_empty() {
-        for &row in &game.pending_clear {
-            if row < BOARD_H {
-                let gy = 1 + row;
-                for x in 0..BOARD_W {
-                    let gx = 1 + x * CELL_W;
-                    if gy < PLAY_H && gx + 1 < PLAY_W {
-                        grid[gy][gx] = '█';
-                        grid[gy][gx + 1] = '█';
-                    }
-                }
-            }
-        }
-    }
-
     if game.active_piece {
         // Ghost piece: draw with faint glyphs.
         let ghost = game.ghost_piece();
@@ -139,6 +123,22 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
                 let (xu, yu) = (x as usize, y as usize);
                 if xu < game.board.width && yu < game.board.height {
                     plot_block(&mut grid, xu, yu, left, right);
+                }
+            }
+        }
+    }
+
+    // Line clear flash overlay overrides everything in the row.
+    if game.clear_flash_frames > 0 && !game.pending_clear.is_empty() {
+        for &row in &game.pending_clear {
+            if row < BOARD_H {
+                let gy = 1 + row;
+                for x in 0..BOARD_W {
+                    let gx = 1 + x * CELL_W;
+                    if gy < PLAY_H && gx + 1 < PLAY_W {
+                        grid[gy][gx] = '█';
+                        grid[gy][gx + 1] = '█';
+                    }
                 }
             }
         }

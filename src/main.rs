@@ -229,9 +229,16 @@ impl Game {
         match ev {
             CommandEvent::Start { id, command } => {
                 let chunks = crate::commands::command_to_chunks(&command);
-                let run = CommandRun::new(id, chunks);
+                let mut run = CommandRun::new(id, chunks);
+                let (cycle, pieces) = run.next_cycle_pieces();
+                for p in pieces {
+                    self.piece_queue.push_back(QueuedPiece {
+                        run_id: id,
+                        cycle,
+                        piece: p,
+                    });
+                }
                 self.active_runs.insert(id, run);
-                self.ensure_queue();
                 if !self.active_piece {
                     self.spawn_next();
                 }

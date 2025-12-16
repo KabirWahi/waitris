@@ -1,13 +1,18 @@
 use std::error::Error;
 use std::io::{stdout, Stdout};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::env;
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
 use ratatui::backend::CrosstermBackend;
 use ratatui::prelude::*;
 use ratatui::text::Line;
@@ -27,7 +32,7 @@ const PLAY_W: usize = BOARD_W * CELL_W + 2; // inner width plus side walls
 const PLAY_H: usize = BOARD_H + 2; // inner height plus ceiling/floor
 const MIN_PANE_WIDTH: u16 = 36;
 const CHUNK_SIZE: usize = 8;
-const PLACEHOLDER_COMMANDS: &[&str] = &["git push", "cargo test", "ls -la", "npm run build"];
+const SOCKET_PATH: &str = "/tmp/stack-game.sock";
 
 #[derive(Clone, Copy)]
 enum Cell {
@@ -82,6 +87,41 @@ struct Piece {
     x: i32,
     y: i32,
     payload: Vec<char>,
+}
+
+#[derive(Debug)]
+enum CommandEvent {
+    Start { id: u64, command: String },
+    End { id: u64, _exit_code: i32 },
+}
+
+struct CommandRun {
+    id: u64,
+    chunks: Vec<String>,
+    cycle: u64,
+    active: bool,
+}
+
+impl CommandRun {
+    fn new(id: u64, chunks: Vec<String>) -> Self {
+        Self {
+            id,
+            chunks,
+            cycle: 0,
+            active: true,
+        }
+    }
+
+    fn next_cycle_pieces(&mut self) -> Vec<Piece> {
+        self.cycle = self.cycle.wrapping_add(1);
+        let mut pieces = Vec::new();
+        for chunk in &self.chunks {
+            let payload = chunk_to_payload(chunk);
+            let shape = random_shape();
+            pieces.push(Piece::with_payload(shape, payload));
+        }
+        pieces
+    }
 }
 
 impl Piece {
@@ -208,15 +248,16 @@ struct Game {
     lock_flash_cells: Vec<(usize, usize)>,
     lock_flash_frames: u8,
     piece_queue: VecDeque<Piece>,
-    placeholder_idx: usize,
+    active_piece: bool,
+    active_runs: HashMap<u64, CommandRun>,
 }
 
 impl Game {
-fn new() -> Self {
+    fn new() -> Self {
         let board = Board::new(BOARD_W, BOARD_H);
-        let mut game = Self {
+        let game = Self {
             board,
-            current: Piece::with_payload(Shape::I, vec!['I'; CHUNK_SIZE]),
+            current: Piece::with_payload(Shape::I, vec!['░'; CHUNK_SIZE]),
             game_over: false,
             score: 0,
             lines_cleared: 0,
@@ -225,10 +266,9 @@ fn new() -> Self {
             lock_flash_cells: Vec::new(),
             lock_flash_frames: 0,
             piece_queue: VecDeque::new(),
-            placeholder_idx: 0,
+            active_piece: false,
+            active_runs: HashMap::new(),
         };
-        game.refill_placeholders();
-        game.spawn_next();
         game
     }
 
@@ -260,23 +300,13 @@ fn new() -> Self {
             }
         }
         self.lock_flash_frames = 1;
+        self.active_piece = false;
         let full_rows: Vec<usize> = (0..self.board.height)
             .filter(|y| (0..self.board.width).all(|x| matches!(self.board.get(x, *y), Cell::Filled(_, _))))
             .collect();
         if !full_rows.is_empty() {
             self.pending_clear = full_rows;
             self.clear_flash_frames = 2;
-        }
-    }
-
-    fn spawn_piece(&mut self, shape: Shape, payload: Vec<char>) -> bool {
-        let mut piece = Piece::with_payload(shape, payload);
-        // Try default spawn position; if blocked, game over in future steps.
-        if self.can_place(&piece) {
-            self.current = piece;
-            true
-        } else {
-            false
         }
     }
 
@@ -310,6 +340,9 @@ fn new() -> Self {
         if self.game_over {
             return;
         }
+        if !self.active_piece {
+            return;
+        }
         if !self.move_current(0, 1) {
             self.lock_piece();
             self.spawn_next();
@@ -318,6 +351,9 @@ fn new() -> Self {
 
     fn hard_drop(&mut self) {
         if self.game_over {
+            return;
+        }
+        if !self.active_piece {
             return;
         }
         while self.move_current(0, 1) {}
@@ -338,17 +374,16 @@ fn new() -> Self {
     }
 
     fn spawn_next(&mut self) {
-        if self.piece_queue.is_empty() {
-            self.refill_placeholders();
-        }
+        self.ensure_queue();
         if let Some(piece) = self.piece_queue.pop_front() {
+            self.active_piece = true;
             if self.can_place(&piece) {
                 self.current = piece;
             } else {
                 self.game_over = true;
             }
         } else {
-            self.game_over = true;
+            self.active_piece = false;
         }
     }
 
@@ -363,9 +398,43 @@ fn new() -> Self {
         ghost
     }
 
-    fn clear_full_lines(&mut self) -> u64 {
-        // Deprecated in favor of perform_pending_clear; kept for reference.
-        0
+    fn handle_command_event(&mut self, ev: CommandEvent) {
+        match ev {
+            CommandEvent::Start { id, command } => {
+                let chunks = command_to_chunks(&command);
+                let run = CommandRun::new(id, chunks);
+                self.active_runs.insert(id, run);
+                self.ensure_queue();
+                if !self.active_piece {
+                    self.spawn_next();
+                }
+            }
+            CommandEvent::End { id, .. } => {
+                if let Some(run) = self.active_runs.get_mut(&id) {
+                    run.active = false;
+                }
+            }
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.active_piece
+            || !self.piece_queue.is_empty()
+            || self.active_runs.values().any(|r| r.active)
+    }
+
+    fn ensure_queue(&mut self) {
+        if !self.piece_queue.is_empty() {
+            return;
+        }
+        for run in self.active_runs.values_mut() {
+            if run.active {
+                let pieces = run.next_cycle_pieces();
+                for p in pieces {
+                    self.piece_queue.push_back(p);
+                }
+            }
+        }
     }
 
     fn add_score(&mut self, cleared: u64) {
@@ -404,28 +473,23 @@ fn new() -> Self {
         self.pending_clear.clear();
     }
 
-    fn refill_placeholders(&mut self) {
-        if PLACEHOLDER_COMMANDS.is_empty() {
-            return;
-        }
-        let cmd = PLACEHOLDER_COMMANDS[self.placeholder_idx % PLACEHOLDER_COMMANDS.len()];
-        self.placeholder_idx = self.placeholder_idx.wrapping_add(1);
-        let pieces = command_to_pieces(cmd);
-        for p in pieces {
-            self.piece_queue.push_back(p);
-        }
-    }
 }
 
 fn command_to_pieces(cmd: &str) -> Vec<Piece> {
     let mut pieces = Vec::new();
-    for token in cmd.split_whitespace() {
-        for chunk in chunk_token(token) {
-            let payload = chunk_to_payload(&chunk);
-            pieces.push(Piece::with_payload(random_shape(), payload));
-        }
+    for chunk in command_to_chunks(cmd) {
+        let payload = chunk_to_payload(&chunk);
+        pieces.push(Piece::with_payload(random_shape(), payload));
     }
     pieces
+}
+
+fn command_to_chunks(cmd: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    for token in cmd.split_whitespace() {
+        chunks.extend(chunk_token(token));
+    }
+    chunks
 }
 
 fn chunk_token(token: &str) -> Vec<String> {
@@ -467,6 +531,54 @@ fn random_shape() -> Shape {
     *shapes.choose(&mut rng).unwrap_or(&Shape::I)
 }
 
+fn spawn_socket_listener(tx: mpsc::Sender<CommandEvent>) {
+    let _ = fs::remove_file(SOCKET_PATH);
+    let listener = UnixListener::bind(SOCKET_PATH).ok();
+    thread::spawn(move || {
+        if let Some(listener) = listener {
+            for stream in listener.incoming() {
+                if let Ok(stream) = stream {
+                    handle_stream(stream, &tx);
+                }
+            }
+        }
+    });
+}
+
+fn handle_stream(stream: UnixStream, tx: &mpsc::Sender<CommandEvent>) {
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        if let Ok(line) = line {
+            if let Some(ev) = parse_command_line(&line) {
+                let _ = tx.send(ev);
+            }
+        }
+    }
+}
+
+fn parse_command_line(line: &str) -> Option<CommandEvent> {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix("START ") {
+        let mut parts = rest.splitn(2, ' ');
+        let id_str = parts.next()?;
+        let cmd = parts.next().unwrap_or("").trim();
+        let id = id_str.parse().ok()?;
+        return Some(CommandEvent::Start {
+            id,
+            command: cmd.to_string(),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("END ") {
+        let mut parts = rest.split_whitespace();
+        let id_str = parts.next()?;
+        let code_str = parts.next().unwrap_or("0");
+        let id = id_str.parse().ok()?;
+        let exit_code = code_str.parse().unwrap_or(0);
+        return Some(CommandEvent::End { id, _exit_code: exit_code });
+    }
+    None
+}
+
 struct TuiGuard {
     terminal: Term,
 }
@@ -505,16 +617,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_app(terminal: &mut Term) -> Result<(), Box<dyn Error>> {
     let mut game = Game::new();
+    let (tx, rx) = mpsc::channel();
+    spawn_socket_listener(tx);
     let mut last_tick = Instant::now();
 
     loop {
+        for ev in rx.try_iter() {
+            game.handle_command_event(ev);
+        }
+
         terminal.draw(|frame| draw_game(frame, &game))?;
 
         game.process_effects();
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                if matches!(key.code, KeyCode::Char('q')) {
                     break;
                 }
                 handle_input(key.code, &mut game);
@@ -653,7 +771,7 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
     }
 
     // Helper to plot a filled block in the inner area. Draw as `letter + light filler`.
-    let mut plot_block = |grid: &mut [Vec<char>], bx: usize, by: usize, left: char, right: char| {
+    let plot_block = |grid: &mut [Vec<char>], bx: usize, by: usize, left: char, right: char| {
         let gx = 1 + bx * CELL_W;
         let gy = 1 + by;
         if gy < PLAY_H && gx + 1 < PLAY_W {
@@ -691,28 +809,30 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
         }
     }
 
-    // Ghost piece: draw with faint glyphs.
-    let ghost = game.ghost_piece();
-    for (x, y, _) in ghost.cells() {
-        if x >= 0 && y >= 0 {
-            let (xu, yu) = (x as usize, y as usize);
-            if xu < game.board.width && yu < game.board.height {
-                let gx = 1 + xu * CELL_W;
-                let gy = 1 + yu;
-                if gy < PLAY_H && gx + 1 < PLAY_W {
-                    grid[gy][gx] = '·';
-                    grid[gy][gx + 1] = '·';
+    if game.active_piece {
+        // Ghost piece: draw with faint glyphs.
+        let ghost = game.ghost_piece();
+        for (x, y, _) in ghost.cells() {
+            if x >= 0 && y >= 0 {
+                let (xu, yu) = (x as usize, y as usize);
+                if xu < game.board.width && yu < game.board.height {
+                    let gx = 1 + xu * CELL_W;
+                    let gy = 1 + yu;
+                    if gy < PLAY_H && gx + 1 < PLAY_W {
+                        grid[gy][gx] = '·';
+                        grid[gy][gx + 1] = '·';
+                    }
                 }
             }
         }
-    }
 
-    // Active piece.
-    for (x, y, (left, right)) in game.current.cells_with_pairs() {
-        if x >= 0 && y >= 0 {
-            let (xu, yu) = (x as usize, y as usize);
-            if xu < game.board.width && yu < game.board.height {
-                plot_block(&mut grid, xu, yu, left, right);
+        // Active piece.
+        for (x, y, (left, right)) in game.current.cells_with_pairs() {
+            if x >= 0 && y >= 0 {
+                let (xu, yu) = (x as usize, y as usize);
+                if xu < game.board.width && yu < game.board.height {
+                    plot_block(&mut grid, xu, yu, left, right);
+                }
             }
         }
     }
@@ -734,7 +854,7 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
             width: overlay_w,
             height: overlay_h,
         };
-        let overlay = Paragraph::new("GAME OVER\nPress q/Esc")
+        let overlay = Paragraph::new("GAME OVER\nPress q")
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(overlay, popup);
@@ -744,21 +864,38 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
 fn draw_sidebar(frame: &mut Frame, game: &Game, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(5), Constraint::Length(9)].as_ref())
+        .constraints([Constraint::Length(10), Constraint::Min(5), Constraint::Length(9)].as_ref())
         .split(area);
 
+    let running = game.is_running();
+    let status = if game.game_over {
+        "OVER"
+    } else if running {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        if (millis / 300) % 2 == 0 {
+            "ACTIVE"
+        } else {
+            "      "
+        }
+    } else {
+        "IDLE"
+    };
+
     let info = Paragraph::new(format!(
-        "SCORE\n{}\n\nLINES\n{}\n\nMODE\n{}",
+        "SCORE\n{}\n\nLINES\n{}\n\nSTATUS\n{}",
         game.score,
         game.lines_cleared,
-        if game.game_over { "IDLE" } else { "RUN" }
+        status
     ))
     .block(Block::default().title("INFO").borders(Borders::ALL))
     .wrap(Wrap { trim: true });
     frame.render_widget(info, chunks[0]);
 
     let controls = Paragraph::new(
-        "←/→ move\n↑ rotate\n↓ soft\nspace slam\nq/esc quit",
+        "←/→ move\n↑ rotate\n↓ soft\nspace slam\nq quit",
     )
     .block(Block::default().title("CONTROLS").borders(Borders::ALL))
     .wrap(Wrap { trim: true });

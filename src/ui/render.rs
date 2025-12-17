@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::prelude::*;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::{Game, BOARD_H, BOARD_W, CELL_W, MIN_PANE_WIDTH, PLAY_H, PLAY_W};
 use crate::game::Cell;
@@ -20,43 +20,57 @@ pub fn draw_game(frame: &mut Frame, game: &Game) {
 
     // Outer "cabinet" frame.
     let cabinet = Block::default()
-        .title("STACK")
+        .title("WAITRIS")
         .border_type(BorderType::Thick)
         .borders(Borders::ALL)
         .title_alignment(Alignment::Left);
     let cabinet_inner = cabinet.inner(area);
     frame.render_widget(cabinet, area);
 
-    // Split into play area (left) and sidebar (right).
-    let cols = Layout::default()
+    let well_w = PLAY_W as u16;
+    let well_h = PLAY_H as u16;
+
+    let col_rect = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min((PLAY_W as u16 + 6).max(30)), // padding left of playfield
-            Constraint::Length(24),
+            Constraint::Min(0),
+            Constraint::Length(well_w),
+            Constraint::Min(0),
         ])
-        .split(cabinet_inner);
+        .split(cabinet_inner)[1];
 
-    // Center the fixed-size playfield within the left column.
-    let v_center = Layout::default()
+    let info_h = 5u16;
+    let controls_h = 5u16;
+    let stack = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),
-            Constraint::Length(PLAY_H as u16),
-            Constraint::Min(1),
+            Constraint::Min(0),
+            Constraint::Length(info_h),
+            Constraint::Length(well_h),
+            Constraint::Length(controls_h),
+            Constraint::Min(0),
         ])
-        .split(cols[0]);
-    let h_center = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(PLAY_W as u16),
-            Constraint::Min(1),
-        ])
-        .split(v_center[1]);
-    let play_rect = h_center[1];
+        .split(col_rect);
 
-    draw_playfield(frame, game, play_rect);
-    draw_sidebar(frame, game, cols[1]);
+    let mut info_rect = stack[1];
+    let well_rect = stack[2];
+    let mut controls_rect = stack[3];
+    // Widen info/controls boxes slightly while keeping them centered in the cabinet.
+    let expand = 4u16;
+    let max_right = cabinet_inner.x + cabinet_inner.width;
+    let new_x = info_rect.x.saturating_sub(expand);
+    let mut new_w = info_rect.width.saturating_add(expand * 2);
+    if new_x + new_w > max_right {
+        new_w = max_right.saturating_sub(new_x);
+    }
+    info_rect.x = new_x;
+    info_rect.width = new_w;
+    controls_rect.x = new_x;
+    controls_rect.width = new_w;
+
+    draw_info(frame, game, info_rect);
+    draw_playfield(frame, game, well_rect);
+    draw_controls(frame, controls_rect);
 }
 
 fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
@@ -181,12 +195,7 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
     }
 }
 
-fn draw_sidebar(frame: &mut Frame, game: &Game, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(16), Constraint::Min(5), Constraint::Length(9)].as_ref())
-        .split(area);
-
+fn draw_info(frame: &mut Frame, game: &Game, area: Rect) {
     let running = game.is_running();
     let status = if game.game_over {
         "OVER"
@@ -204,22 +213,54 @@ fn draw_sidebar(frame: &mut Frame, game: &Game, area: Rect) {
         "IDLE"
     };
 
-    let info = Paragraph::new(format!(
-        "SCORE\n{}\n\nLINES\n{}\n\nSTATUS\n{}\n\nVARIETY\n{}\n\nBOMBS\n{}",
-        game.score,
-        game.lines_cleared,
-        status,
-        game.variety_meter,
-        game.bombs
-    ))
-    .block(Block::default().title("INFO").borders(Borders::ALL))
-    .wrap(Wrap { trim: true });
-    frame.render_widget(info, chunks[0]);
+    let block = Block::default().title("INFO").borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    let controls = Paragraph::new(
-        "←/→ move\n↑ rotate\n↓ soft\nspace slam\nq quit",
-    )
-    .block(Block::default().title("CONTROLS").borders(Borders::ALL))
-    .wrap(Wrap { trim: true });
-    frame.render_widget(controls, chunks[2]);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(inner);
+
+    let left = Paragraph::new(vec![
+        Line::raw(format!("{:<7} {}", "SCORE:", game.score)),
+        Line::raw(format!("{:<7} {}", "LINES:", game.lines_cleared)),
+        Line::raw(format!("{:<7} {}", "STATUS:", status)),
+    ])
+    .alignment(Alignment::Left);
+    frame.render_widget(left, cols[0]);
+
+    let right = Paragraph::new(vec![
+        Line::raw(format!("{:<6} {}", "BOMBS:", game.bombs)),
+        Line::raw(format!("{:<6} {}", "VARIETY:", game.variety_meter)),
+    ])
+    .alignment(Alignment::Left);
+    frame.render_widget(right, cols[1]);
+}
+
+fn draw_controls(frame: &mut Frame, area: Rect) {
+    let block = Block::default().title("CONTROLS").borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(inner);
+
+    let left = Paragraph::new(vec![
+        Line::raw("←/→ move"),
+        Line::raw("↓ soft"),
+        Line::raw("q/esc quit"),
+    ])
+    .alignment(Alignment::Left);
+    frame.render_widget(left, cols[0]);
+
+    let right = Paragraph::new(vec![
+        Line::raw("↑ rotate"),
+        Line::raw("space slam"),
+        Line::raw(""),
+    ])
+    .alignment(Alignment::Left);
+    frame.render_widget(right, cols[1]);
 }

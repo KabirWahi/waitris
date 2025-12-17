@@ -6,7 +6,7 @@ fn main() -> ExitCode {
     let pane_w = env::var("STACK_PANE_W")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(36);
+        .unwrap_or(24);
 
     if !tmux_available() {
         eprintln!("tmux not found on PATH. Please install tmux to use the launcher.");

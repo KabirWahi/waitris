@@ -1,4 +1,5 @@
-use crate::{game::random_shape, Piece, CHUNK_SIZE};
+use crate::{game::random_shape, CHUNK_SIZE};
+use crate::game::Piece;
 
 #[allow(dead_code)]
 pub fn command_to_pieces(cmd: &str) -> Vec<Piece> {
@@ -12,8 +13,8 @@ pub fn command_to_pieces(cmd: &str) -> Vec<Piece> {
 
 pub fn command_to_chunks(cmd: &str) -> Vec<String> {
     let mut chunks = Vec::new();
-    for token in cmd.split_whitespace() {
-        chunks.extend(chunk_token(token));
+    for token in crate::commands::tokenize_command(cmd) {
+        chunks.extend(chunk_token(&token));
     }
     chunks
 }

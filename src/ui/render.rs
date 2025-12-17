@@ -5,6 +5,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
 use crate::{Game, BOARD_H, BOARD_W, CELL_W, MIN_PANE_WIDTH, PLAY_H, PLAY_W};
+use crate::game::Cell;
 
 pub fn draw_game(frame: &mut Frame, game: &Game) {
     let area = frame.size();
@@ -90,7 +91,7 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
     // Locked cells (with optional lock flash override).
     for y in 0..game.board.height {
         for x in 0..game.board.width {
-            if let crate::Cell::Filled(left_ch, right_ch) = game.board.get(x, y) {
+            if let Cell::Filled(left_ch, right_ch) = game.board.get(x, y) {
                 let flashing = game.lock_flash_frames > 0
                     && game.lock_flash_cells.contains(&(x, y));
                 let left = if flashing { '▓' } else { left_ch };

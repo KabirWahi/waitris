@@ -55,4 +55,8 @@ else
   exit 1
 fi
 
+echo "Note: PATH changes take effect in new shells. If 'waitris' is not found,"
+echo "start a new terminal or run:"
+echo "  export PATH=\"${CARGO_BIN}:\$PATH\""
+
 echo "Done. Run 'waitris' to launch."

@@ -1,48 +1,73 @@
 # WAITRIS
 
-Terminal Tetris driven by your shell commands.
+WAITRIS is a terminal Tetris game driven by your shell commands. It launches a tmux split: your shell on the left, the game on the right.
 
-## Install
+## Prerequisites
 
-1) Build the binaries:
+- Rust toolchain (for building from source)
+- tmux
+- socat
 
-```sh
-cargo build
-```
-
-2) Ensure tmux is installed (required for the split launcher).
-
-3) Run the launcher:
+Install tmux + socat:
 
 ```sh
-cargo run --bin waitris
+# macOS (Homebrew)
+brew install tmux socat
+
+# Debian/Ubuntu
+sudo apt-get install tmux socat
 ```
 
-This opens a tmux session with:
-- left pane: your shell
-- right pane: the game
+## Install (from source)
 
-## Shell Hook (optional, to stream commands)
-
-Source the hook in your shell so commands emit START/END events:
+From the repo root:
 
 ```sh
-source /path/to/stack-game/scripts/stack-hook.sh
+cargo install --path . --bin waitris
 ```
 
-If you want it always on, add it to your shell profile (zsh example):
+Make sure your cargo bin directory is on PATH:
 
 ```sh
-echo 'source /path/to/stack-game/scripts/stack-hook.sh' >> ~/.zshrc
+export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-To remove, delete that line from your shell profile.
+## Run
+
+```sh
+waitris
+```
+
+To quit the whole session from the left pane:
+
+```sh
+waitris quit
+```
+
+## Shell Hook (required)
+
+The hook streams START/END events for each shell command to the game.
+
+Install:
+
+```sh
+waitris install-hook
+```
+
+Uninstall:
+
+```sh
+waitris uninstall-hook
+```
 
 ## Notes
 
-- The game listens on: `/tmp/stack-game.sock`
-- You can run just the game (no tmux) with:
+- The game listens on `/tmp/stack-game.sock`.
+
+## One‑line installer (placeholder)
 
 ```sh
-cargo run --bin stack-game
+curl -fsSL https://example.com/waitris/install.sh | sh
 ```
+
+This will install `waitris` and run `waitris install-hook` for you.
